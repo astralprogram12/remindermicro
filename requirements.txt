@@ -1,2 +1,4 @@
 flask
 supabase
+python-dotenv
+requests
