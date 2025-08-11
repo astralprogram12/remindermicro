@@ -17,10 +17,10 @@ if not all([config.SUPABASE_URL, config.SUPABASE_SERVICE_KEY, config.FONNTE_TOKE
 
 supabase: Client = create_client(config.SUPABASE_URL, config.SUPABASE_SERVICE_KEY)
 
-# --- The Cron Job Endpoint ---
+# --- The Cron Job Endpoint (Corrected Version) ---
 @app.route('/api/send-reminders', methods=['POST'])
 def send_reminders_route():
-    # 1. Secure the endpoint
+    # 1. Secure the endpoint (no changes here)
     auth_header = request.headers.get('Authorization')
     if auth_header != f"Bearer {config.CRON_SECRET}":
         print("!!! UNAUTHORIZED ATTEMPT to access /api/send-reminders")
@@ -29,13 +29,11 @@ def send_reminders_route():
     print("--- CRON JOB TRIGGERED: Checking for due reminders ---")
     
     try:
-        # 2. Find tasks where reminder_at is in the past and reminder_sent is false
+        # --- QUERY STEP 1: Find all due tasks ---
         now_utc = datetime.now(timezone.utc).isoformat()
         
-        # Query tasks and join with user_whatsapp table to get the phone number directly
-        # The syntax 'user_whatsapp!inner(phone)' ensures we only get tasks with a valid user
         due_tasks_res = supabase.table("tasks") \
-            .select("id, description, user_id, user_whatsapp!inner(phone)") \
+            .select("id, description, user_id") \
             .lte("reminder_at", now_utc) \
             .eq("reminder_sent", False) \
             .execute()
@@ -50,15 +48,29 @@ def send_reminders_route():
 
         print(f"Found {len(due_tasks_res.data)} reminder(s) to send.")
 
-        # 3. Loop through due tasks, send message, and update the database
+        # --- STEP 2: Loop through tasks, get phone number for each, send, and update ---
         for task in due_tasks_res.data:
-            user_phone = task['user_whatsapp']['phone']
+            user_id = task.get('user_id')
+            if not user_id:
+                continue # Skip if task has no user
+
+            # --- QUERY STEP 2a: Get the user's phone number ---
+            phone_res = supabase.table("user_whatsapp") \
+                .select("phone") \
+                .eq("user_id", user_id) \
+                .execute()
+
+            if not phone_res.data:
+                print(f"Could not find phone number for user_id {user_id}. Skipping task {task['id']}.")
+                continue # Skip if user has no phone number in the system
+
+            user_phone = phone_res.data[0]['phone']
             message = f"🔔 Reminder: {task['description']}"
             
             print(f"Sending reminder for task ID {task['id']} to phone {user_phone}")
             services.send_fonnte_message(user_phone, message)
             
-            # 4. CRITICAL: Mark the reminder as sent to prevent duplicates
+            # --- STEP 3: CRITICAL: Mark the reminder as sent ---
             supabase.table("tasks") \
                 .update({"reminder_sent": True}) \
                 .eq("id", task['id']) \
