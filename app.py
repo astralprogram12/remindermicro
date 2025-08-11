@@ -17,6 +17,7 @@ if not all([config.SUPABASE_URL, config.SUPABASE_SERVICE_KEY, config.FONNTE_TOKE
 
 supabase: Client = create_client(config.SUPABASE_URL, config.SUPABASE_SERVICE_KEY)
 
+
 # --- The Cron Job Endpoint (Corrected Version) ---
 @app.route('/api/send-reminders', methods=['POST'])
 def send_reminders_route():
@@ -52,17 +53,18 @@ def send_reminders_route():
         for task in due_tasks_res.data:
             user_id = task.get('user_id')
             if not user_id:
-                continue # Skip if task has no user
+                continue # Skip if task somehow has no user_id
 
-            # --- QUERY STEP 2a: Get the user's phone number ---
+            # --- QUERY STEP 2a: Get the user's phone number using the user_id ---
             phone_res = supabase.table("user_whatsapp") \
                 .select("phone") \
                 .eq("user_id", user_id) \
                 .execute()
 
+            # Safety check: if we can't find a phone, skip to the next task
             if not phone_res.data:
                 print(f"Could not find phone number for user_id {user_id}. Skipping task {task['id']}.")
-                continue # Skip if user has no phone number in the system
+                continue
 
             user_phone = phone_res.data[0]['phone']
             message = f"🔔 Reminder: {task['description']}"
@@ -70,7 +72,7 @@ def send_reminders_route():
             print(f"Sending reminder for task ID {task['id']} to phone {user_phone}")
             services.send_fonnte_message(user_phone, message)
             
-            # --- STEP 3: CRITICAL: Mark the reminder as sent ---
+            # --- STEP 3: CRITICAL: Mark the reminder as sent to avoid spamming ---
             supabase.table("tasks") \
                 .update({"reminder_sent": True}) \
                 .eq("id", task['id']) \
