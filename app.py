@@ -140,6 +140,4 @@ def update_job_after_run(job: dict, status: str):
         final_status = "completed" if status == "success" else "error"
         supabase.table("scheduled_actions").update({"status": final_status}).eq("id", job['id']).execute()
 
-# To run this microservice locally for testing
-if __name__ == '__main__':
-    app.run(port=5001)
+
