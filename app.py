@@ -8,10 +8,10 @@ import traceback
 import pytz
 from croniter import croniter
 
-# Local imports (ensure these files are in the same directory or accessible)
+# Local imports
 import config
 import services
-import database # We need database helpers to get user/task info
+import database_scheduler as db # <-- THE CHANGE IS HERE
 
 app = Flask(__name__)
 
@@ -64,7 +64,7 @@ def handle_due_reminders():
 
     sent_count = 0
     for task in due_tasks_res.data:
-        user_phone = database.get_user_phone_by_id(supabase, task['user_id'])
+        user_phone = db.get_user_phone_by_id(supabase, task['user_id']) # <-- UPDATED
         if user_phone:
             message = f"🔔 Reminder: Don't forget to '{task.get('title')}'"
             services.send_fonnte_message(user_phone, message)
@@ -93,7 +93,7 @@ def handle_due_scheduled_actions():
     executed_count = 0
     for job in due_actions_res.data:
         print(f"Executing job {job['id']} of type '{job['action_type']}'...")
-        user_phone = database.get_user_phone_by_id(supabase, job['user_id'])
+        user_phone = db.get_user_phone_by_id(supabase, job['user_id']) # <-- UPDATED
         
         if not user_phone:
             update_job_after_run(job, "error")
@@ -104,7 +104,7 @@ def handle_due_scheduled_actions():
         payload = job.get('action_payload', {})
         
         if action_type == "summarize_tasks":
-            tasks = database.get_task_context_for_ai(supabase, job['user_id']).get("tasks", [])
+            tasks = db.get_task_context_for_summary(supabase, job['user_id']) # <-- UPDATED
             outstanding = [t for t in tasks if t.get("status") != 'done']
             message = "✨ Daily Summary: You have no outstanding tasks!" if not outstanding else f"✨ Daily Summary! You have {len(outstanding)} tasks to do:\n" + "\n".join([f"- {t['title']}" for t in outstanding])
             services.send_fonnte_message(user_phone, message)
@@ -112,7 +112,7 @@ def handle_due_scheduled_actions():
         elif action_type == "create_recurring_task":
             title = payload.get("title")
             if title:
-                database.add_task_entry(supabase, job['user_id'], title=title, notes=payload.get("notes"))
+                db.add_task_entry(supabase, job['user_id'], title=title, notes=payload.get("notes")) # <-- UPDATED
                 services.send_fonnte_message(user_phone, f"✅ I've just created your scheduled task: '{title}'")
 
         # After execution, reschedule it
@@ -124,11 +124,11 @@ def handle_due_scheduled_actions():
 
 def update_job_after_run(job: dict, status: str):
     """Calculates the next run time for a recurring job and updates it."""
+    now_utc = datetime.now(timezone.utc)
     if status == "success" and job.get("schedule_spec"):
         user_tz = pytz.timezone(job.get("timezone", "UTC"))
         now_in_user_tz = datetime.now(user_tz)
         
-        # This is where croniter is needed for the microservice
         cron = croniter(job['schedule_spec'], now_in_user_tz)
         next_run_local = cron.get_next(datetime)
         next_run_utc = next_run_local.astimezone(pytz.utc)
@@ -136,8 +136,6 @@ def update_job_after_run(job: dict, status: str):
         update_payload = { "next_run_at": next_run_utc.isoformat(), "last_run_at": now_utc.isoformat() }
         supabase.table("scheduled_actions").update(update_payload).eq("id", job['id']).execute()
     else:
-        # If it was a one-time job or failed, mark it as completed/error
         final_status = "completed" if status == "success" else "error"
         supabase.table("scheduled_actions").update({"status": final_status}).eq("id", job['id']).execute()
-
 
