@@ -34,12 +34,12 @@ def run_all_due_jobs():
     try:
         # --- Execute Both Types of Jobs ---
         reminders_sent = handle_due_reminders()
-        actions_executed = handle_due_scheduled_actions()
+        actions_executed = handle_due_ai_actions()
 
         return jsonify({
             "status": "success",
             "reminders_sent": reminders_sent,
-            "scheduled_actions_executed": actions_executed
+            "ai_actions_executed": actions_executed
         }), 200
 
     except Exception as e:
@@ -75,12 +75,12 @@ def handle_due_reminders():
     print(f"Sent {sent_count} reminder(s).")
     return sent_count
 
-def handle_due_scheduled_actions():
+def handle_due_ai_actions():
     """Finds and executes recurring scheduled actions."""
     print("--- Checking for due scheduled actions ---")
     now_utc = datetime.now(timezone.utc)
     
-    due_actions_res = supabase.table("scheduled_actions") \
+    due_actions_res = supabase.table("ai_actions") \
         .select("*") \
         .lte("next_run_at", now_utc.isoformat()) \
         .eq("status", "active") \
@@ -134,8 +134,9 @@ def update_job_after_run(job: dict, status: str):
         next_run_utc = next_run_local.astimezone(pytz.utc)
 
         update_payload = { "next_run_at": next_run_utc.isoformat(), "last_run_at": now_utc.isoformat() }
-        supabase.table("scheduled_actions").update(update_payload).eq("id", job['id']).execute()
+        supabase.table("ai_actions").update(update_payload).eq("id", job['id']).execute()
     else:
         final_status = "completed" if status == "success" else "error"
-        supabase.table("scheduled_actions").update({"status": final_status}).eq("id", job['id']).execute()
+        supabase.table("ai_actions").update({"status": final_status}).eq("id", job['id']).execute()
+
 
