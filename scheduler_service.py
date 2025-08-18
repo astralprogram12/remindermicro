@@ -67,6 +67,25 @@ def handle_due_reminders():
         user_phone = db.get_user_phone_by_id(supabase, task['user_id']) # <-- UPDATED
         if user_phone:
             message = f"🔔 Reminder: Don't forget to '{task.get('title')}'"
+            
+            # Log reminder sending attempt
+            try:
+                db.log_action(
+                    supabase=supabase,
+                    user_id=task['user_id'],
+                    action_type="send_reminder",
+                    entity_type="task",
+                    entity_id=task['id'],
+                    action_details={
+                        "task_title": task.get('title'),
+                        "message_sent": message,
+                        "user_phone": user_phone
+                    },
+                    success_status=True
+                )
+            except Exception as log_err:
+                print(f"!!! SCHEDULER LOGGING ERROR: {log_err}")
+            
             services.send_fonnte_message(user_phone, message)
             
             supabase.table("tasks").update({"reminder_sent": True}).eq("id", task['id']).execute()
@@ -107,13 +126,132 @@ def handle_due_ai_actions():
             tasks = db.get_task_context_for_summary(supabase, job['user_id']) # <-- UPDATED
             outstanding = [t for t in tasks if t.get("status") != 'done']
             message = "✨ Daily Summary: You have no outstanding tasks!" if not outstanding else f"✨ Daily Summary! You have {len(outstanding)} tasks to do:\n" + "\n".join([f"- {t['title']}" for t in outstanding])
+            
+            # Log summarize_tasks action
+            try:
+                db.log_action(
+                    supabase=supabase,
+                    user_id=job['user_id'],
+                    action_type="ai_action_summarize_tasks",
+                    entity_type="ai_action",
+                    entity_id=job['id'],
+                    action_details={
+                        "job_description": job.get('description'),
+                        "outstanding_count": len(outstanding),
+                        "message_sent": message
+                    },
+                    success_status=True
+                )
+            except Exception as log_err:
+                print(f"!!! SCHEDULER LOGGING ERROR: {log_err}")
+            
             services.send_fonnte_message(user_phone, message)
 
         elif action_type == "create_recurring_task":
             title = payload.get("title")
             if title:
-                db.add_task_entry(supabase, job['user_id'], title=title, notes=payload.get("notes")) # <-- UPDATED
+                new_task = db.add_task_entry(supabase, job['user_id'], title=title, notes=payload.get("notes")) # <-- UPDATED
+                
+                # Log create_recurring_task action
+                try:
+                    db.log_action(
+                        supabase=supabase,
+                        user_id=job['user_id'],
+                        action_type="ai_action_create_task",
+                        entity_type="ai_action",
+                        entity_id=job['id'],
+                        action_details={
+                            "job_description": job.get('description'),
+                            "task_title": title,
+                            "task_notes": payload.get("notes"),
+                            "created_task_id": new_task.get('id') if new_task else None
+                        },
+                        success_status=bool(new_task)
+                    )
+                except Exception as log_err:
+                    print(f"!!! SCHEDULER LOGGING ERROR: {log_err}")
+                
                 services.send_fonnte_message(user_phone, f"✅ I've just created your scheduled task: '{title}'")
+
+        elif action_type == "task_for_day":
+            today_tasks = db.get_tasks_for_today(supabase, job['user_id'])
+            
+            if not today_tasks:
+                message = "🌟 Amazing! You have a clean slate today! No urgent tasks or deadlines. Perfect time to focus on what truly matters!"
+            else:
+                task_count = len(today_tasks)
+                if task_count == 1:
+                    intro = "🎯 **Focus Day!** You have one key task today:"
+                elif task_count <= 3:
+                    intro = f"💪 **Power Day!** You've got {task_count} important tasks:"
+                else:
+                    intro = f"🚀 **Action Day!** {task_count} tasks ready for your attention:"
+                
+                task_list = "\n".join([f"• {t['title']}" for t in today_tasks[:5]])  # Limit to 5 for message length
+                if task_count > 5:
+                    task_list += f"\n... and {task_count - 5} more!"
+                
+                message = f"{intro}\n\n{task_list}\n\n✨ You've got this! Take them one at a time."
+            
+            # Log task_for_day action
+            try:
+                db.log_action(
+                    supabase=supabase,
+                    user_id=job['user_id'],
+                    action_type="ai_action_task_for_day",
+                    entity_type="ai_action",
+                    entity_id=job['id'],
+                    action_details={
+                        "job_description": job.get('description'),
+                        "tasks_count": len(today_tasks),
+                        "message_sent": message
+                    },
+                    success_status=True
+                )
+            except Exception as log_err:
+                print(f"!!! SCHEDULER LOGGING ERROR: {log_err}")
+            
+            services.send_fonnte_message(user_phone, message)
+
+        elif action_type == "summary_of_day":
+            completed_tasks = db.get_completed_tasks_for_today(supabase, job['user_id'])
+            
+            if not completed_tasks:
+                message = "🌱 Every journey starts with a single step! Progress isn't always about checking boxes. What small win can you celebrate today?"
+            else:
+                task_count = len(completed_tasks)
+                if task_count == 1:
+                    intro = "🎉 **Victory!** You completed an important task today:"
+                elif task_count <= 3:
+                    intro = f"🏆 **Champion!** You crushed {task_count} tasks today:"
+                else:
+                    intro = f"🚀 **Powerhouse!** You demolished {task_count} tasks today:"
+                
+                task_list = "\n".join([f"✅ {t['title']}" for t in completed_tasks[:5]])  # Limit to 5 for message length
+                if task_count > 5:
+                    task_list += f"\n... and {task_count - 5} more!"
+                
+                message = f"{intro}\n\n{task_list}\n\n🎆 Outstanding work! You're building incredible momentum!"
+            
+            # Log summary_of_day action
+            try:
+                db.log_action(
+                    supabase=supabase,
+                    user_id=job['user_id'],
+                    action_type="ai_action_summary_of_day",
+                    entity_type="ai_action",
+                    entity_id=job['id'],
+                    action_details={
+                        "job_description": job.get('description'),
+                        "completed_count": len(completed_tasks),
+                        "message_sent": message
+                    },
+                    success_status=True
+                )
+            except Exception as log_err:
+                print(f"!!! SCHEDULER LOGGING ERROR: {log_err}")
+            
+            services.send_fonnte_message(user_phone, message)
 
         # After execution, reschedule it
         update_job_after_run(job, "success")
