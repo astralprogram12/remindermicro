@@ -12,6 +12,7 @@ from croniter import croniter
 import config
 import services
 import database_scheduler as db # <-- THE CHANGE IS HERE
+import database_silent
 
 app = Flask(__name__)
 
@@ -35,11 +36,15 @@ def run_all_due_jobs():
         # --- Execute Both Types of Jobs ---
         reminders_sent = handle_due_reminders()
         actions_executed = handle_due_ai_actions()
+        silent_sessions_managed = handle_daily_silent_mode()
+        expired_sessions_ended = handle_expired_silent_sessions()
 
         return jsonify({
             "status": "success",
             "reminders_sent": reminders_sent,
-            "ai_actions_executed": actions_executed
+            "ai_actions_executed": actions_executed,
+            "silent_sessions_managed": silent_sessions_managed,
+            "expired_sessions_ended": expired_sessions_ended
         }), 200
 
     except Exception as e:
@@ -276,5 +281,163 @@ def update_job_after_run(job: dict, status: str):
     else:
         final_status = "completed" if status == "success" else "error"
         supabase.table("ai_actions").update({"status": final_status}).eq("id", job['id']).execute()
+
+def handle_daily_silent_mode():
+    """Handles daily silent mode activation/deactivation based on user preferences."""
+    print("--- Checking for daily silent mode management ---")
+    
+    try:
+        from datetime import datetime, timezone, timedelta
+        import pytz
+        
+        managed_count = 0
+        now_utc = datetime.now(timezone.utc)
+        
+        # Get all users with auto silent mode enabled
+        users_result = supabase.table("user_whatsapp") \
+            .select("user_id, timezone, auto_silent_enabled, auto_silent_start_hour, auto_silent_end_hour") \
+            .eq("auto_silent_enabled", True) \
+            .execute()
+        
+        if not users_result.data:
+            print("No users with auto silent mode enabled.")
+            return 0
+        
+        for user in users_result.data:
+            user_id = user['user_id']
+            user_timezone = user.get('timezone', 'UTC')
+            start_hour = user.get('auto_silent_start_hour', 7)
+            end_hour = user.get('auto_silent_end_hour', 11)
+            
+            try:
+                # Convert UTC time to user's timezone
+                tz = pytz.timezone(user_timezone)
+                user_time = now_utc.astimezone(tz)
+                current_hour = user_time.hour
+                
+                # Check if we're at the start hour and should activate silent mode
+                if current_hour == start_hour:
+                    # Check if user already has active silent session
+                    active_session = database_silent.get_active_silent_session(supabase, user_id)
+                    
+                    if not active_session:
+                        # Calculate duration until end hour
+                        if end_hour > start_hour:
+                            duration_hours = end_hour - start_hour
+                        else:
+                            # Handle case where end hour is next day (e.g., 23:00 to 07:00)
+                            duration_hours = (24 - start_hour) + end_hour
+                        
+                        duration_minutes = duration_hours * 60
+                        
+                        # Create silent session
+                        session = database_silent.create_silent_session(
+                            supabase, user_id, duration_minutes, 'auto'
+                        )
+                        
+                        if session:
+                            # Send activation notification
+                            user_phone = db.get_user_phone_by_id(supabase, user_id)
+                            if user_phone:
+                                message = f"🔇 **Auto Silent Mode Activated** \n\nI'm now in silent mode from {start_hour:02d}:00 to {end_hour:02d}:00 as per your preferences.\n\nI'll continue processing your requests but won't send replies until {end_hour:02d}:00. You'll get a summary then.\n\n💡 **To exit early:** Send 'exit silent mode'"
+                                services.send_fonnte_message(user_phone, message)
+                                
+                                # Log the activation
+                                try:
+                                    db.log_action(
+                                        supabase=supabase,
+                                        user_id=user_id,
+                                        action_type="auto_activate_silent_mode",
+                                        entity_type="silent_session",
+                                        entity_id=session['id'],
+                                        action_details={
+                                            "start_hour": start_hour,
+                                            "end_hour": end_hour,
+                                            "duration_minutes": duration_minutes,
+                                            "timezone": user_timezone,
+                                            "notification_sent": True
+                                        },
+                                        success_status=True
+                                    )
+                                except Exception as log_err:
+                                    print(f"!!! LOGGING ERROR for auto silent activation: {log_err}")
+                            
+                            managed_count += 1
+                            print(f"Auto-activated silent mode for user {user_id} from {start_hour}:00 to {end_hour}:00")
+                
+            except Exception as user_err:
+                print(f"!!! ERROR processing auto silent mode for user {user_id}: {user_err}")
+                continue
+        
+        return managed_count
+        
+    except Exception as e:
+        print(f"!!! ERROR in handle_daily_silent_mode: {e}")
+        traceback.print_exc()
+        return 0
+
+def handle_expired_silent_sessions():
+    """Ends expired silent sessions and sends summaries."""
+    print("--- Checking for expired silent sessions ---")
+    
+    try:
+        ended_count = 0
+        
+        # Get expired sessions
+        expired_sessions = database_silent.get_expired_silent_sessions(supabase)
+        
+        if not expired_sessions:
+            print("No expired silent sessions found.")
+            return 0
+        
+        for session in expired_sessions:
+            try:
+                # End the session
+                session_data = database_silent.end_silent_session(supabase, session['id'], 'expired')
+                
+                if session_data:
+                    ended_count += 1
+                    
+                    # Generate and send summary
+                    user_phone = db.get_user_phone_by_id(supabase, session['user_id'])
+                    if user_phone:
+                        # Import the summary generation function
+                        from ai_tools import generate_silent_mode_summary
+                        summary = generate_silent_mode_summary(session_data)
+                        
+                        # Send the summary
+                        services.send_fonnte_message(user_phone, summary)
+                        
+                        # Log the summary sending
+                        try:
+                            db.log_action(
+                                supabase=supabase,
+                                user_id=session['user_id'],
+                                action_type="send_silent_mode_summary",
+                                entity_type="silent_session",
+                                entity_id=session['id'],
+                                action_details={
+                                    "session_duration_minutes": session_data.get('duration_minutes', 0),
+                                    "actions_count": session_data.get('action_count', 0),
+                                    "trigger_type": session_data.get('trigger_type', 'unknown'),
+                                    "summary_sent": True
+                                },
+                                success_status=True
+                            )
+                        except Exception as log_err:
+                            print(f"!!! LOGGING ERROR for silent mode summary: {log_err}")
+                        
+                        print(f"Sent silent mode summary to user {session['user_id']} for session {session['id']}")
+                    
+            except Exception as session_err:
+                print(f"!!! ERROR ending expired session {session['id']}: {session_err}")
+                continue
+        
+        return ended_count
+        
+    except Exception as e:
+        print(f"!!! ERROR in handle_expired_silent_sessions: {e}")
+        traceback.print_exc()
+        return 0
 
 
