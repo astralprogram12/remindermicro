@@ -22,6 +22,72 @@ if not all([config.SUPABASE_URL, config.SUPABASE_SERVICE_KEY, config.FONNTE_TOKE
 
 supabase: Client = create_client(config.SUPABASE_URL, config.SUPABASE_SERVICE_KEY)
 
+# --- Helper Functions ---
+def generate_simple_silent_mode_summary(session_data: dict) -> str:
+    """Generates a simple summary message for ended silent mode sessions."""
+    try:
+        duration_minutes = session_data.get('duration_minutes', 0)
+        action_count = session_data.get('action_count', 0)
+        trigger_type = session_data.get('trigger_type', 'unknown')
+        accumulated_actions = session_data.get('accumulated_actions', [])
+        
+        # Convert duration to readable format
+        if duration_minutes < 60:
+            duration_text = f"{duration_minutes} minute{'s' if duration_minutes != 1 else ''}"
+        else:
+            hours = duration_minutes // 60
+            remaining_minutes = duration_minutes % 60
+            if remaining_minutes == 0:
+                duration_text = f"{hours} hour{'s' if hours != 1 else ''}"
+            else:
+                duration_text = f"{hours}h {remaining_minutes}m"
+        
+        # Create header based on trigger type
+        if trigger_type == 'auto':
+            header = "🔔 **Auto Silent Mode Ended**"
+            intro = f"Your scheduled silent period ({duration_text}) has ended."
+        else:
+            header = "🔔 **Silent Mode Ended**"
+            intro = f"Your {duration_text} silent period has ended."
+        
+        # Create action summary
+        if action_count == 0:
+            activity_summary = "\n✨ You had a peaceful time - no activity during silent mode."
+        elif action_count == 1:
+            activity_summary = "\n📋 **Activity Summary:**\n1 action was processed while you were in silent mode."
+        else:
+            activity_summary = f"\n📋 **Activity Summary:**\n{action_count} actions were processed while you were in silent mode."
+        
+        # Add some recent actions if available (limit to 3 most recent)
+        if accumulated_actions:
+            recent_actions = accumulated_actions[-3:]  # Get last 3 actions
+            action_list = []
+            for i, action in enumerate(recent_actions, 1):
+                action_text = action.get('content', action.get('action_type', 'Unknown action'))
+                # Limit action text length
+                if len(action_text) > 80:
+                    action_text = action_text[:77] + "..."
+                action_list.append(f"{i}. {action_text}")
+            
+            if len(accumulated_actions) > 3:
+                activity_summary += f"\n\nLast {len(recent_actions)} actions:"
+            else:
+                activity_summary += "\n\nActions processed:"
+            
+            activity_summary += "\n" + "\n".join(action_list)
+            
+            if len(accumulated_actions) > 3:
+                activity_summary += f"\n... and {len(accumulated_actions) - 3} more"
+        
+        footer = "\n\n🤖 I'm back online and ready to help!"
+        
+        return f"{header}\n\n{intro}{activity_summary}{footer}"
+        
+    except Exception as e:
+        print(f"!!! ERROR generating silent mode summary: {e}")
+        return "🔔 **Silent Mode Ended**\n\nYour silent period has ended. I'm back online and ready to help!"
+
+
 # --- The Main Cron Job Endpoint ---
 @app.route('/api/run-jobs', methods=['POST'])
 def run_all_due_jobs():
@@ -401,9 +467,8 @@ def handle_expired_silent_sessions():
                     # Generate and send summary
                     user_phone = db.get_user_phone_by_id(supabase, session['user_id'])
                     if user_phone:
-                        # Import the summary generation function
-                        from ai_tools import generate_silent_mode_summary
-                        summary = generate_silent_mode_summary(session_data)
+                        # Generate summary locally
+                        summary = generate_simple_silent_mode_summary(session_data)
                         
                         # Send the summary
                         services.send_fonnte_message(user_phone, summary)

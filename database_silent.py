@@ -172,7 +172,7 @@ def get_user_silent_preferences(supabase: Client, user_id: str) -> Dict[str, Any
         
         # Return defaults if no preferences found
         return {
-            'auto_silent_enabled': True,
+            'auto_silent_enabled': False,
             'start_hour': 7,
             'end_hour': 11,
             'timezone': 'UTC'
@@ -205,16 +205,42 @@ def update_user_silent_preferences(supabase: Client, user_id: str, **preferences
 def get_expired_silent_sessions(supabase: Client) -> List[Dict[str, Any]]:
     """Gets all expired silent sessions that are still marked as active."""
     try:
-        # Use raw SQL for more complex time calculations
-        query = """
-        SELECT * FROM silent_sessions 
-        WHERE is_active = true 
-        AND start_time + (duration_minutes || ' minutes')::INTERVAL < NOW()
-        ORDER BY start_time ASC
-        """
+        # Get all active sessions
+        result = supabase.table('silent_sessions') \
+            .select('*') \
+            .eq('is_active', True) \
+            .execute()
         
-        result = supabase.rpc('raw_sql', {'query': query}).execute()
-        return result.data if result.data else []
+        if not result.data:
+            return []
+        
+        expired_sessions = []
+        current_time = datetime.now(timezone.utc)
+        
+        for session in result.data:
+            try:
+                # Parse start time
+                start_time_str = session['start_time']
+                if start_time_str.endswith('Z'):
+                    start_time_str = start_time_str[:-1] + '+00:00'
+                
+                start_time = datetime.fromisoformat(start_time_str)
+                if start_time.tzinfo is None:
+                    start_time = start_time.replace(tzinfo=timezone.utc)
+                
+                # Calculate end time
+                duration_minutes = session['duration_minutes']
+                end_time = start_time + timedelta(minutes=duration_minutes)
+                
+                # Check if expired
+                if current_time > end_time:
+                    expired_sessions.append(session)
+                    
+            except Exception as session_err:
+                print(f"!!! ERROR processing session {session.get('id', 'unknown')}: {session_err}")
+                continue
+        
+        return expired_sessions
         
     except Exception as e:
         print(f"!!! DATABASE ERROR in get_expired_silent_sessions: {e}")
