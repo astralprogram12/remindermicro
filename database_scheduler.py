@@ -19,13 +19,16 @@ def get_due_schedules(supabase: Client, now_utc_iso: str) -> List[Dict[str, Any]
         return []
 
 # V-- CORRECTED RETURN TYPE
-def get_user_phone_by_id(supabase: Client, user_id: str) -> Union[str, None]:
-    """Gets a user's phone number from their user ID."""
+def get_user_phone_by_id(supabase: Client, user_id: str) -> str | None:
+    """
+    Fetches a user's primary phone number using their user_id.
+    This is required to send them messages.
+    """
     try:
-        res = supabase.table("users").select("phone").eq("id", user_id).limit(1).execute()
-        return res.data[0]['phone'] if res.data else None
+        res = supabase.table('user_whatsapp').select('phone').eq('user_id', user_id).limit(1).execute()
+        return res.data[0].get('phone') if res.data else None
     except Exception as e:
-        logger.error(f"DB Error fetching user phone for {user_id}: {e}")
+        print(f"!!! DB SCHEDULER ERROR in get_user_phone_by_id: {e}")
         return None
 
 # V-- CORRECTED RETURN TYPE

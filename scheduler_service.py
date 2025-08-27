@@ -48,27 +48,34 @@ class ActionExecutor:
 
     def _execute_send_notification(self, schedule: Dict):
         user_phone = db.get_user_phone_by_id(self.supabase, schedule['user_id'])
-        if not user_phone: return
+        if not user_phone: 
+            print(f"Skipping notification for user {schedule['user_id']}: No phone number found.")
+            return
 
         message = schedule.get('action_payload', {}).get('message', 'You have a scheduled reminder.')
-        services.send_fonnte_message(user_phone, f"🔔 Reminder: {message}")
-        print(f"Sent notification to user {schedule['user_id']}")
-
+        
+        # --- MODIFIED BLOCK ---
+        success = services.send_fonnte_message(user_phone, f"🔔 Reminder: {message}")
+        if success:
+            print(f"Message successfully queued for sending to user {schedule['user_id']}.")
+        else:
+            print(f"Failed to send notification for schedule {schedule['id']}. See service error above.")
     def _execute_create_task(self, schedule: Dict):
         user_phone = db.get_user_phone_by_id(self.supabase, schedule['user_id'])
-        if not user_phone: return
+        # It's okay if user_phone is None here, we can still create the task
         
         payload = schedule.get('action_payload', {})
         new_task = db.create_task_from_schedule(self.supabase, schedule['user_id'], payload)
         
         if new_task:
             title = new_task.get('title')
-            services.send_fonnte_message(user_phone, f"✅ I've just created your scheduled task: '{title}'")
             print(f"Created scheduled task '{title}' for user {schedule['user_id']}")
+            if user_phone: # Only try to send a message if a phone number exists
+                services.send_fonnte_message(user_phone, f"✅ I've just created your scheduled task: '{title}'")
         else:
-            services.send_fonnte_message(user_phone, "⚠️ I tried to create a scheduled task for you, but something went wrong.")
             print(f"Failed to create scheduled task for user {schedule['user_id']}")
-
+            if user_phone:
+                services.send_fonnte_message(user_phone, "⚠️ I tried to create a scheduled task for you, but something went wrong.")
     def _execute_ai_prompt(self, schedule: Dict):
         user_phone = db.get_user_phone_by_id(self.supabase, schedule['user_id'])
         if not user_phone: return
