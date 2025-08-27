@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 import traceback
 from croniter import croniter
 import google.generativeai as genai
-
+from typing import Dict
 # Local imports
 import config
 import services  # Assuming this has send_fonnte_message

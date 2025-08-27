@@ -1,8 +1,7 @@
 # database_scheduler.py
-
 import logging
 from supabase import Client
-from typing import Dict, List, Any
+from typing import Dict, List, Any, Union # <-- Import Union
 
 logger = logging.getLogger(__name__)
 
@@ -19,7 +18,8 @@ def get_due_schedules(supabase: Client, now_utc_iso: str) -> List[Dict[str, Any]
         logger.error(f"DB Error fetching due schedules: {e}")
         return []
 
-def get_user_phone_by_id(supabase: Client, user_id: str) -> str or None:
+# V-- CORRECTED RETURN TYPE
+def get_user_phone_by_id(supabase: Client, user_id: str) -> Union[str, None]:
     """Gets a user's phone number from their user ID."""
     try:
         res = supabase.table("users").select("phone").eq("id", user_id).limit(1).execute()
@@ -28,7 +28,8 @@ def get_user_phone_by_id(supabase: Client, user_id: str) -> str or None:
         logger.error(f"DB Error fetching user phone for {user_id}: {e}")
         return None
 
-def create_task_from_schedule(supabase: Client, user_id: str, payload: Dict) -> Dict or None:
+# V-- CORRECTED RETURN TYPE
+def create_task_from_schedule(supabase: Client, user_id: str, payload: Dict) -> Union[Dict, None]:
     """Creates a new task entry from a schedule's payload."""
     try:
         task_data = {
