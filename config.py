@@ -14,3 +14,4 @@ GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 # WARNING: The SERVICE_ROLE_KEY is a secret and should never be exposed in client-side code.
 SUPABASE_URL = os.environ.get("SUPABASE_URL")
 SUPABASE_SERVICE_KEY = os.environ.get("SUPABASE_SERVICE_KEY")
+CRON_SECRET = os.environ.get("CRON_SECRET")
