@@ -16,6 +16,7 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 # --- Initialize Supabase Client ---
 try:
     supabase_url = config.SUPABASE_URL
+    supabase_key = config.SUPABASE_SERVICE_KEY
 
     supabase: Client = create_client(supabase_url, supabase_key)
     logging.info("Supabase client initialized successfully.")
