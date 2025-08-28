@@ -10,7 +10,7 @@ import google.generativeai as genai
 from typing import Dict
 # Local imports
 import config
-import services  # Assuming this has send_fonnte_message
+import services
 import database_scheduler as db
 
 app = Flask(__name__)
@@ -21,7 +21,8 @@ if not all([config.SUPABASE_URL, config.SUPABASE_SERVICE_KEY, config.FONNTE_TOKE
 
 supabase: Client = create_client(config.SUPABASE_URL, config.SUPABASE_SERVICE_KEY)
 genai.configure(api_key=config.GEMINI_API_KEY)
-ai_model = genai.GenerativeModel('gemini-2.5-flash')
+# Note: Ensure you are using a model that fits your use case.
+ai_model = genai.GenerativeModel('gemini-1.5-flash')
 
 # --- The Action Executor Class ---
 class ActionExecutor:
@@ -43,6 +44,9 @@ class ActionExecutor:
             self._execute_create_task(schedule)
         elif action_type == 'execute_prompt':
             self._execute_ai_prompt(schedule)
+        # --- NEW: Add the daily_summary action to the router ---
+        elif action_type == 'daily_summary':
+            self._execute_daily_summary(schedule)
         else:
             print(f"Unknown action type: {action_type}")
 
@@ -53,29 +57,27 @@ class ActionExecutor:
             return
 
         message = schedule.get('action_payload', {}).get('message', 'You have a scheduled reminder.')
-        
-        # --- MODIFIED BLOCK ---
         success = services.send_fonnte_message(user_phone, f"🔔 Reminder: {message}")
         if success:
             print(f"Message successfully queued for sending to user {schedule['user_id']}.")
         else:
-            print(f"Failed to send notification for schedule {schedule['id']}. See service error above.")
+            print(f"Failed to send notification for schedule {schedule['id']}.")
+
     def _execute_create_task(self, schedule: Dict):
         user_phone = db.get_user_phone_by_id(self.supabase, schedule['user_id'])
-        # It's okay if user_phone is None here, we can still create the task
-        
         payload = schedule.get('action_payload', {})
         new_task = db.create_task_from_schedule(self.supabase, schedule['user_id'], payload)
         
         if new_task:
             title = new_task.get('title')
             print(f"Created scheduled task '{title}' for user {schedule['user_id']}")
-            if user_phone: # Only try to send a message if a phone number exists
+            if user_phone:
                 services.send_fonnte_message(user_phone, f"✅ I've just created your scheduled task: '{title}'")
         else:
             print(f"Failed to create scheduled task for user {schedule['user_id']}")
             if user_phone:
                 services.send_fonnte_message(user_phone, "⚠️ I tried to create a scheduled task for you, but something went wrong.")
+
     def _execute_ai_prompt(self, schedule: Dict):
         user_phone = db.get_user_phone_by_id(self.supabase, schedule['user_id'])
         if not user_phone: return
@@ -93,6 +95,33 @@ class ActionExecutor:
         except Exception as e:
             print(f"AI prompt execution failed for user {schedule['user_id']}: {e}")
             services.send_fonnte_message(user_phone, "⚠️ I tried to run your scheduled AI action, but an error occurred.")
+
+    # --- NEW: Method to handle the daily summary ---
+    def _execute_daily_summary(self, schedule: Dict):
+        """Fetches, formats, and sends the user's daily summary."""
+        user_id = schedule['user_id']
+        user_phone = db.get_user_phone_by_id(self.supabase, user_id)
+        if not user_phone:
+            print(f"Skipping daily summary for user {user_id}: No phone number found.")
+            return
+        
+        print(f"Generating daily summary for user {user_id}...")
+        # The agent should have saved the user's timezone when creating the schedule
+        user_timezone = schedule.get('timezone', 'UTC') 
+        
+        # 1. Fetch the raw data from the database
+        summary_data = db.get_daily_summary_data(self.supabase, user_id, user_timezone)
+        
+        # 2. Format the data into a user-friendly message
+        summary_message = db.format_daily_summary_message(summary_data)
+        
+        # 3. Send the message
+        success = services.send_fonnte_message(user_phone, summary_message)
+        if success:
+            print(f"Daily summary successfully sent to user {user_id}.")
+        else:
+            print(f"Failed to send daily summary for user {user_id}.")
+
 
 # --- The Main Cron Job Endpoint ---
 @app.route('/api/run-schedules', methods=['POST'])
@@ -113,7 +142,7 @@ def run_schedules_endpoint():
         return jsonify({"status": "internal_server_error", "message": str(e)}), 500
 
 def handle_due_schedules():
-    """Finds and executes all due scheduled actions from the new unified table."""
+    """Finds and executes all due scheduled actions."""
     now_utc = datetime.now(timezone.utc)
     
     due_schedules = db.get_due_schedules(supabase, now_utc.isoformat())
@@ -131,7 +160,7 @@ def handle_due_schedules():
             reschedule_or_complete_job(schedule, now_utc)
         except Exception as e:
             print(f"!!! FAILED to process schedule {schedule['id']}: {e}")
-            db.update_schedule(supabase, schedule['id'], {"status": "failed"})
+            db.update_schedule(supabase, schedule['id'], {"status": "failed", "error_message": str(e)})
 
     return len(due_schedules)
 
@@ -139,7 +168,6 @@ def reschedule_or_complete_job(schedule: dict, now_utc: datetime):
     """Calculates the next run time for a recurring job or completes a one-time job."""
     if schedule['schedule_type'] == 'cron':
         try:
-            # Use croniter to find the next occurrence from the current time.
             cron_rule = schedule['schedule_value']
             iterator = croniter(cron_rule, now_utc)
             next_run_utc = iterator.get_next(datetime)
@@ -149,12 +177,10 @@ def reschedule_or_complete_job(schedule: dict, now_utc: datetime):
             print(f"Rescheduled job {schedule['id']}. Next run at: {next_run_utc.isoformat()}")
         except Exception as e:
             print(f"!!! FAILED to reschedule job {schedule['id']}: {e}")
-            db.update_schedule(supabase, schedule['id'], {"status": "failed"})
+            db.update_schedule(supabase, schedule['id'], {"status": "failed", "error_message": f"CRON reschedule failed: {e}"})
     else: # 'one_time'
         db.update_schedule(supabase, schedule['id'], {"status": "completed", "last_run_at": now_utc.isoformat()})
         print(f"Completed one-time job {schedule['id']}.")
 
 if __name__ == '__main__':
-    # This allows running the Flask app locally for testing.
-    # For production, use a proper WSGI server like Gunicorn.
     app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 8080)))
