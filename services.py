@@ -1,120 +1,186 @@
-# scheduler_runner.py
+# scheduler_service.py
+
 import os
-import logging
-from datetime import datetime, timezone
+from flask import Flask, request, jsonify
 from supabase import create_client, Client
+from datetime import datetime, timezone
+import traceback
 from croniter import croniter
-
-# Import our custom modules
-import database_scheduler
+import google.generativeai as genai
+from typing import Dict
+# Local imports
+import config
 import services
-import config # Assumes you have a config.py with SUPABASE_URL, SUPABASE_KEY etc.
+import database_scheduler as db
 
-# --- Setup Logging ---
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+app = Flask(__name__)
 
-# --- Initialize Supabase Client ---
-try:
-    supabase_url = config.SUPABASE_URL
-    supabase_key = config.SUPABASE_SERVICE_KEY
+# --- Initialization ---
+if not all([config.SUPABASE_URL, config.SUPABASE_SERVICE_KEY, config.FONNTE_TOKEN, config.CRON_SECRET, config.GEMINI_API_KEY]):
+    raise ValueError("One or more required environment variables are missing.")
 
-    supabase: Client = create_client(supabase_url, supabase_key)
-    logging.info("Supabase client initialized successfully.")
-except Exception as e:
-    logging.critical(f"Failed to initialize Supabase client: {e}")
-    exit(1)
+supabase: Client = create_client(config.SUPABASE_URL, config.SUPABASE_SERVICE_KEY)
+genai.configure(api_key=config.GEMINI_API_KEY)
+# Note: Ensure you are using a model that fits your use case.
+ai_model = genai.GenerativeModel('gemini-2.5-flash')
 
+# --- The Action Executor Class ---
+class ActionExecutor:
+    """
+    This class is responsible for executing the specific action defined
+    in a schedule record from the database.
+    """
+    def __init__(self, supabase_client: Client, ai_model_instance):
+        self.supabase = supabase_client
+        self.ai_model = ai_model_instance
 
-def process_schedule(schedule: dict):
-    """Processes a single due schedule."""
-    logging.info(f"Processing schedule ID: {schedule['id']} for user: {schedule['user_id']}")
-    action_type = schedule.get('action_type')
-    user_id = schedule.get('user_id')
-    payload = schedule.get('action_payload', {})
-
-    # --- Action Execution Logic ---
-    phone_number = database_scheduler.get_user_phone_by_id(supabase, user_id)
-    if not phone_number:
-        logging.error(f"Could not find phone number for user {user_id}. Skipping schedule.")
-        # Mark as failed to avoid retrying indefinitely
-        database_scheduler.update_schedule(supabase, schedule['id'], {'status': 'failed', 'error_message': 'User phone not found'})
-        return
-
-    if action_type == 'send_notification':
-        message = payload.get('message', 'You have a scheduled reminder.')
-        services.send_fonnte_message(phone_number, message)
-
-    elif action_type == 'create_task':
-        task = database_scheduler.create_task_from_schedule(supabase, user_id, payload)
-        if task:
-            confirmation = f"I've created a new task for you: '{task.get('title')}'"
-            services.send_fonnte_message(phone_number, confirmation)
+    def execute(self, schedule: Dict):
+        action_type = schedule.get('action_type')
+        
+        # A simple router to call the correct method based on the action type.
+        if action_type == 'send_notification':
+            self._execute_send_notification(schedule)
+        elif action_type == 'create_task':
+            self._execute_create_task(schedule)
+        elif action_type == 'execute_prompt':
+            self._execute_ai_prompt(schedule)
+        # --- NEW: Add the daily_summary action to the router ---
+        elif action_type == 'daily_summary':
+            self._execute_daily_summary(schedule)
         else:
-            logging.error(f"Failed to create task from schedule {schedule['id']}")
+            print(f"Unknown action type: {action_type}")
 
-    elif action_type == 'daily_summary':
-        user_timezone = schedule.get('timezone', 'UTC')
-        summary_data = database_scheduler.get_daily_summary_data(supabase, user_id, user_timezone)
-        summary_message = database_scheduler.format_daily_summary_message(summary_data)
-        services.send_fonnte_message(phone_number, summary_message)
+    def _execute_send_notification(self, schedule: Dict):
+        user_phone = db.get_user_phone_by_id(self.supabase, schedule['user_id'])
+        if not user_phone: 
+            print(f"Skipping notification for user {schedule['user_id']}: No phone number found.")
+            return
 
-    elif action_type == 'execute_prompt':
-        # TODO: Implement the logic to call the AI model with the prompt from the payload
-        logging.warning(f"Action 'execute_prompt' is not yet implemented. Schedule ID: {schedule['id']}")
-        pass
+        message = schedule.get('action_payload', {}).get('message', 'You have a scheduled reminder.')
+        success = services.send_fonnte_message(user_phone, f"🔔 Reminder: {message}")
+        if success:
+            print(f"Message successfully queued for sending to user {schedule['user_id']}.")
+        else:
+            print(f"Failed to send notification for schedule {schedule['id']}.")
 
-    else:
-        logging.error(f"Unknown action type '{action_type}' for schedule ID: {schedule['id']}")
-        # Mark as failed
-        database_scheduler.update_schedule(supabase, schedule['id'], {'status': 'failed', 'error_message': f'Unknown action type: {action_type}'})
-        return
+    def _execute_create_task(self, schedule: Dict):
+        user_phone = db.get_user_phone_by_id(self.supabase, schedule['user_id'])
+        payload = schedule.get('action_payload', {})
+        new_task = db.create_task_from_schedule(self.supabase, schedule['user_id'], payload)
+        
+        if new_task:
+            title = new_task.get('title')
+            print(f"Created scheduled task '{title}' for user {schedule['user_id']}")
+            if user_phone:
+                services.send_fonnte_message(user_phone, f"✅ I've just created your scheduled task: '{title}'")
+        else:
+            print(f"Failed to create scheduled task for user {schedule['user_id']}")
+            if user_phone:
+                services.send_fonnte_message(user_phone, "⚠️ I tried to create a scheduled task for you, but something went wrong.")
 
-    # --- Post-Execution Schedule Update ---
-    if schedule.get('schedule_type') == 'one_time':
-        # One-time tasks are completed after running
-        update_patch = {'status': 'completed'}
-        database_scheduler.update_schedule(supabase, schedule['id'], update_patch)
-        logging.info(f"Marked one-time schedule {schedule['id']} as completed.")
-    
-    elif schedule.get('schedule_type') == 'cron':
-        # For recurring tasks, calculate the next run time
-        now_utc = datetime.now(timezone.utc)
-        cron_str = schedule.get('schedule_value')
+    def _execute_ai_prompt(self, schedule: Dict):
+        user_phone = db.get_user_phone_by_id(self.supabase, schedule['user_id'])
+        if not user_phone: return
+
+        prompt = schedule.get('action_payload', {}).get('prompt')
+        if not prompt:
+            print(f"Execute prompt for user {schedule['user_id']} failed: No prompt in payload.")
+            return
+        
         try:
-            # croniter helps us find the next scheduled time AFTER the current time
-            iter = croniter(cron_str, now_utc)
-            next_run_dt = iter.get_next(datetime)
-            next_run_iso = next_run_dt.isoformat()
-            
-            update_patch = {'next_run_at': next_run_iso}
-            database_scheduler.update_schedule(supabase, schedule['id'], update_patch)
-            logging.info(f"Rescheduled cron job {schedule['id']} to {next_run_iso}.")
+            print(f"Executing AI prompt for user {schedule['user_id']}...")
+            response = self.ai_model.generate_content(prompt)
+            services.send_fonnte_message(user_phone, f"🤖 Here is your scheduled AI response:\n\n{response.text}")
+            print(f"Sent AI prompt response to user {schedule['user_id']}")
         except Exception as e:
-            logging.error(f"Failed to calculate next run for cron schedule {schedule['id']}: {e}")
-            database_scheduler.update_schedule(supabase, schedule['id'], {'status': 'failed', 'error_message': 'Invalid CRON expression'})
+            print(f"AI prompt execution failed for user {schedule['user_id']}: {e}")
+            services.send_fonnte_message(user_phone, "⚠️ I tried to run your scheduled AI action, but an error occurred.")
+
+    # --- NEW: Method to handle the daily summary ---
+    def _execute_daily_summary(self, schedule: Dict):
+        """Fetches, formats, and sends the user's daily summary."""
+        user_id = schedule['user_id']
+        user_phone = db.get_user_phone_by_id(self.supabase, user_id)
+        if not user_phone:
+            print(f"Skipping daily summary for user {user_id}: No phone number found.")
+            return
+        
+        print(f"Generating daily summary for user {user_id}...")
+        # The agent should have saved the user's timezone when creating the schedule
+        user_timezone = schedule.get('timezone', 'UTC') 
+        
+        # 1. Fetch the raw data from the database
+        summary_data = db.get_daily_summary_data(self.supabase, user_id, user_timezone)
+        
+        # 2. Format the data into a user-friendly message
+        summary_message = db.format_daily_summary_message(summary_data)
+        
+        # 3. Send the message
+        success = services.send_fonnte_message(user_phone, summary_message)
+        if success:
+            print(f"Daily summary successfully sent to user {user_id}.")
+        else:
+            print(f"Failed to send daily summary for user {user_id}.")
 
 
-def main():
-    """Main function to run the scheduler."""
-    logging.info("Scheduler runner started.")
+# --- The Main Cron Job Endpoint ---
+@app.route('/api/run-schedules', methods=['POST'])
+def run_schedules_endpoint():
+    # 1. Secure the endpoint
+    auth_header = request.headers.get('Authorization')
+    if auth_header != f"Bearer {config.CRON_SECRET}":
+        return jsonify({"status": "error", "message": "Unauthorized"}), 401
+
+    print(f"\n--- SCHEDULER TRIGGERED at {datetime.now(timezone.utc).isoformat()} ---")
     
-    now_utc_iso = datetime.now(timezone.utc).isoformat()
-    due_schedules = database_scheduler.get_due_schedules(supabase, now_utc_iso)
+    try:
+        executed_count = handle_due_schedules()
+        return jsonify({"status": "success", "schedules_executed": executed_count}), 200
+    except Exception as e:
+        print(f"!!! AN UNEXPECTED ERROR OCCURRED IN SCHEDULER: {e}")
+        traceback.print_exc()
+        return jsonify({"status": "internal_server_error", "message": str(e)}), 500
+
+def handle_due_schedules():
+    """Finds and executes all due scheduled actions."""
+    now_utc = datetime.now(timezone.utc)
     
+    due_schedules = db.get_due_schedules(supabase, now_utc.isoformat())
     if not due_schedules:
-        logging.info("No schedules are due.")
-        return
+        print("No due schedules found.")
+        return 0
 
-    logging.info(f"Found {len(due_schedules)} schedules to process.")
+    print(f"Found {len(due_schedules)} due schedule(s).")
+    executor = ActionExecutor(supabase, ai_model)
+    
     for schedule in due_schedules:
         try:
-            process_schedule(schedule)
+            print(f"Processing schedule {schedule['id']} of type '{schedule['action_type']}'...")
+            executor.execute(schedule)
+            reschedule_or_complete_job(schedule, now_utc)
         except Exception as e:
-            logging.exception(f"An unexpected error occurred while processing schedule {schedule.get('id')}: {e}")
-            # Mark schedule as failed to prevent it from running again
-            database_scheduler.update_schedule(supabase, schedule['id'], {'status': 'failed', 'error_message': str(e)})
+            print(f"!!! FAILED to process schedule {schedule['id']}: {e}")
+            db.update_schedule(supabase, schedule['id'], {"status": "failed", "error_message": str(e)})
 
-    logging.info("Scheduler run finished.")
+    return len(due_schedules)
 
-if __name__ == "__main__":
-    main()
+def reschedule_or_complete_job(schedule: dict, now_utc: datetime):
+    """Calculates the next run time for a recurring job or completes a one-time job."""
+    if schedule['schedule_type'] == 'cron':
+        try:
+            cron_rule = schedule['schedule_value']
+            iterator = croniter(cron_rule, now_utc)
+            next_run_utc = iterator.get_next(datetime)
+
+            update_payload = {"next_run_at": next_run_utc.isoformat(), "last_run_at": now_utc.isoformat()}
+            db.update_schedule(supabase, schedule['id'], update_payload)
+            print(f"Rescheduled job {schedule['id']}. Next run at: {next_run_utc.isoformat()}")
+        except Exception as e:
+            print(f"!!! FAILED to reschedule job {schedule['id']}: {e}")
+            db.update_schedule(supabase, schedule['id'], {"status": "failed", "error_message": f"CRON reschedule failed: {e}"})
+    else: # 'one_time'
+        db.update_schedule(supabase, schedule['id'], {"status": "completed", "last_run_at": now_utc.isoformat()})
+        print(f"Completed one-time job {schedule['id']}.")
+
+if __name__ == '__main__':
+    app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 8080)))

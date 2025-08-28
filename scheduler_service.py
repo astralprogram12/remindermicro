@@ -22,7 +22,7 @@ if not all([config.SUPABASE_URL, config.SUPABASE_SERVICE_KEY, config.FONNTE_TOKE
 supabase: Client = create_client(config.SUPABASE_URL, config.SUPABASE_SERVICE_KEY)
 genai.configure(api_key=config.GEMINI_API_KEY)
 # Note: Ensure you are using a model that fits your use case.
-ai_model = genai.GenerativeModel('gemini-1.5-flash')
+ai_model = genai.GenerativeModel('gemini-2.5-flash')
 
 # --- The Action Executor Class ---
 class ActionExecutor:
